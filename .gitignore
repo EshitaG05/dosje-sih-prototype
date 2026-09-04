@@ -1,0 +1,27 @@
+# Virtual Environments
+backend/venv/
+venv/
+ENV/
+env/
+
+# Dependencies
+frontend/node_modules/
+node_modules/
+
+# Python Cache & Database
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.db
+backend/dosje.db
+
+# Storage & Evidence
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Build files & Environment Variables
+frontend/dist/
+frontend/dist-ssr/
+*.local
+.env
+.DS_Store

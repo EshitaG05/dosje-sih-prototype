@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: dosje-mediamtx
+    ports:
+      - "8554:8554"   # RTSP input
+      - "8889:8889"   # WebRTC (WHEP) for real-time web playback
+      - "8888:8888"   # HLS playback
+    environment:
+      - MTX_PROTOCOLS=tcp
+      - MTX_WEBRTC=yes
