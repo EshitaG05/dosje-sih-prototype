@@ -71,6 +71,31 @@ def seed_data(db: Session = Depends(get_db)):
 def get_all_ngos(db: Session = Depends(get_db)):
     return db.query(models.NGO).all()
 
+
+from pydantic import BaseModel
+
+class NGOReportUpdate(BaseModel):
+    reported_occupancy: int
+    staff_on_duty: int | None = 4
+    remarks: str | None = "Regular daily log"
+
+@app.post("/ngos/{ngo_id}/submit-report")
+def submit_ngo_report(ngo_id: int, payload: NGOReportUpdate, db: Session = Depends(get_db)):
+    ngo = db.query(models.NGO).filter(models.NGO.id == ngo_id).first()
+    if not ngo:
+        raise HTTPException(status_code=404, detail="NGO facility not found")
+    
+    # Update baseline occupancy numbers
+    ngo.reported_occupancy = payload.reported_occupancy
+    db.commit()
+    db.refresh(ngo)
+    return {
+        "status": "success",
+        "message": f"Updated compliance roll for {ngo.name}",
+        "ngo_id": ngo.id,
+        "reported_occupancy": ngo.reported_occupancy
+    }
+
 # 4. Inspection Endpoints (handles both /inspections and /inspections/all)
 @app.get("/inspections")
 @app.get("/inspections/all")

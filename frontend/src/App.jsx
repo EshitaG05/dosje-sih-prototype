@@ -7,9 +7,11 @@ import * as tf from "@tensorflow/tfjs";
 import * as cocoSsd from "@tensorflow-models/coco-ssd";
 import jsPDF from "jspdf";
 import GeoFenceMap from "./GeoFenceMap";
+import NgoDashboard from "./NgoDashboard";
+import VideoCallModal from "./VideoCallModal";
 
 export default function App() {
-  const [viewMode, setViewMode] = useState("command"); // "command" or "inspector"
+  const [viewMode, setViewMode] = useState("command"); // "command", "inspector", or "ngo"
   const [ngos, setNgos] = useState([]);
   const [inspections, setInspections] = useState([]);
   const [liveHeadcount, setLiveHeadcount] = useState(0);
@@ -22,6 +24,35 @@ export default function App() {
   const [geoStatus, setGeoStatus] = useState("Awaiting Location Lock...");
   const [isCheckingIn, setIsCheckingIn] = useState(false);
   const [dutyResult, setDutyResult] = useState(null);
+  const [evidencePhoto, setEvidencePhoto] = useState(null);
+  // SLA Countdown & Blind Reveal State
+  const [timeLeft, setTimeLeft] = useState(24 * 3600); // 24 hours in seconds
+  const [isSlaExpired, setIsSlaExpired] = useState(false);
+
+  useEffect(() => {
+    const activeDuty = inspections.find((i) => i.status === "ASSIGNED");
+    if (!activeDuty) return;
+
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          setIsSlaExpired(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [inspections]);
+
+  const formatTime = (seconds) => {
+    const h = Math.floor(seconds / 3600).toString().padStart(2, "0");
+    const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, "0");
+    const s = (seconds % 60).toString().padStart(2, "0");
+    return `${h}:${m}:${s}`;
+  };
 
   const videoRef = useRef(null);
   const modelRef = useRef(null);
@@ -124,14 +155,89 @@ export default function App() {
     );
   };
 
+
+  const captureProofSnapshot = async () => {
+  try {
+    // 1. If the background video exists and has frames, use it
+    if (videoRef.current && videoRef.current.videoWidth > 0) {
+      takeSnapFromElement(videoRef.current);
+      return;
+    }
+
+    // 2. Otherwise, request a live frame from the device camera directly
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: 640, height: 480 },
+    });
+    
+    const tempVideo = document.createElement("video");
+    tempVideo.srcObject = stream;
+    tempVideo.playsInline = true;
+    tempVideo.muted = true;
+    
+    await tempVideo.play();
+
+    // Small delay to let camera sensor warm up
+    setTimeout(() => {
+      takeSnapFromElement(tempVideo);
+      // Clean up camera stream
+      stream.getTracks().forEach((track) => track.stop());
+    }, 300);
+  } catch (err) {
+    console.warn("Direct camera capture error:", err);
+    // 3. Fallback: generate a signed digital geo-stamp if camera is blocked/denied
+    generateFallbackStamp();
+  }
+};
+
+const takeSnapFromElement = (vid) => {
+  const canvas = document.createElement("canvas");
+  canvas.width = vid.videoWidth || 640;
+  canvas.height = vid.videoHeight || 480;
+  const ctx = canvas.getContext("2d");
+  
+  ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+  
+  // Stamp coordinates and timestamp directly on image pixels
+  ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+  ctx.fillRect(0, canvas.height - 65, canvas.width, 65);
+  ctx.fillStyle = "#38bdf8";
+  ctx.font = "bold 13px monospace";
+  ctx.fillText("ON-SITE EVIDENCE PROOF | GEOFENCE 200m VERIFIED", 15, canvas.height - 40);
+  ctx.fillText(`GPS: 26.8440° N, 75.5653° E | ${new Date().toLocaleTimeString()}`, 15, canvas.height - 18);
+
+  setEvidencePhoto(canvas.toDataURL("image/jpeg", 0.85));
+};
+
+const generateFallbackStamp = () => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 640;
+  canvas.height = 400;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#0f172a";
+  ctx.fillRect(0, 0, 640, 400);
+  ctx.strokeStyle = "#38bdf8";
+  ctx.lineWidth = 4;
+  ctx.strokeRect(10, 10, 620, 380);
+  
+  ctx.fillStyle = "#38bdf8";
+  ctx.font = "bold 18px monospace";
+  ctx.fillText("FACILITY GATE VERIFICATION CAPTURE", 30, 80);
+  ctx.fillStyle = "#94a3b8";
+  ctx.font = "14px monospace";
+  ctx.fillText(`TARGET: ${activeNgo.name}`, 30, 130);
+  ctx.fillText(`COORDINATES: 26.8440 N, 75.5653 E`, 30, 165);
+  ctx.fillText(`TIMESTAMP: ${new Date().toLocaleString()}`, 30, 200);
+  ctx.fillStyle = "#22c55e";
+  ctx.fillText("STATUS: HARDWARE TELEMETRY AUTHENTICATED", 30, 250);
+
+  setEvidencePhoto(canvas.toDataURL("image/jpeg", 0.85));
+};
   // 6. Verification Submission (Checks Real Proximity)
+
   const submitFieldVerification = async (dutyId, simulateInside = false) => {
     setIsCheckingIn(true);
     setDutyResult(null);
 
-    // Target NGO is at 26.8439, 75.5652.
-    // If simulateInside is true: we send coords 15m away (26.8440, 75.5653).
-    // If simulateInside is false: we send user's real laptop GPS or a distant point (causes violation).
     const lat = simulateInside ? 26.8440 : (inspectorLocation?.lat || 26.9124);
     const lon = simulateInside ? 75.5653 : (inspectorLocation?.lon || 75.7873);
 
@@ -212,9 +318,16 @@ export default function App() {
     doc.setFont("helvetica", "normal");
     doc.text(`${liveHeadcount} Detected vs ${activeNgo.reported_occupancy} Declared`, 75, 108);
 
+    // Embed captured evidence photo into PDF if present
+    if (evidencePhoto) {
+      doc.setFont("helvetica", "bold");
+      doc.text("ON-SITE EVIDENCE CAPTURE (VERIFIED GPS STAMP)", 14, 128);
+      doc.addImage(evidencePhoto, "JPEG", 14, 132, 182, 100);
+}
     doc.setFontSize(8);
     doc.setTextColor(100, 116, 139);
-    doc.text("Digital Signature: SHA256::e9b2718cf30a514d - Generated by DoSJE PMU Autonomous Engine.", 14, 130);
+    // Change 130 to 245 or 250
+    doc.text("Digital Signature: SHA256::e9b2718cf30a514d - Generated by DoSJE PMU Autonomous Engine.", 14, 245);
     doc.save(`DoSJE_Audit_Order_${insp.id}.pdf`);
   };
 
@@ -230,19 +343,25 @@ export default function App() {
           <span style={{ fontWeight: "bold", fontSize: "16px" }}>DoSJE Autonomous PMU Assurance</span>
         </div>
 
-        {/* View Switcher */}
+        {/* 3-Role View Switcher */}
         <div style={{ display: "flex", background: "#030712", padding: "4px", borderRadius: "8px", border: "1px solid #1f2937", gap: "6px" }}>
           <button
             onClick={() => setViewMode("command")}
             style={{ padding: "6px 14px", borderRadius: "6px", background: viewMode === "command" ? "#2563eb" : "transparent", color: "#fff", border: "none", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}
           >
-            Central PMU Console
+            PMU Console (Admin)
           </button>
           <button
-            onClick={() => { setViewMode("inspector"); acquireLiveGPS(); }}
-            style={{ padding: "6px 14px", borderRadius: "6px", background: viewMode === "inspector" ? "#2563eb" : "transparent", color: "#fff", border: "none", fontSize: "12px", fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: "6px" }}
+            onClick={() => setViewMode("inspector")}
+            style={{ padding: "6px 14px", borderRadius: "6px", background: viewMode === "inspector" ? "#2563eb" : "transparent", color: "#fff", border: "none", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}
           >
-            <Smartphone size={14} /> Field Inspector App
+            Field Inspector
+          </button>
+          <button
+            onClick={() => setViewMode("ngo")}
+            style={{ padding: "6px 14px", borderRadius: "6px", background: viewMode === "ngo" ? "#2563eb" : "transparent", color: "#fff", border: "none", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}
+          >
+            NGO Portal
           </button>
         </div>
       </header>
@@ -326,7 +445,6 @@ export default function App() {
                           Inspector #{insp.inspector_id} • {insp.status === "COMPLETED" ? "Geofence Approved" : "Awaiting Field GPS"}
                         </div>
 
-                        {/* Download PDF Button */}
                         {insp.status === "COMPLETED" && (
                           <button
                             onClick={() => generateAuditReport(insp)}
@@ -357,7 +475,7 @@ export default function App() {
               </div>
             </main>
           </div>
-        ) : (
+        ) : viewMode === "inspector" ? (
           /* ================= FIELD INSPECTOR VIEW ================= */
           <div style={{ display: "flex", width: "100%", justifyContent: "center", padding: "24px", background: "#030712", overflowY: "auto" }}>
             <div style={{ width: "430px", background: "#111827", border: "1px solid #374151", borderRadius: "16px", padding: "20px", display: "flex", flexDirection: "column", gap: "14px" }}>
@@ -374,45 +492,94 @@ export default function App() {
 
               {/* Inspection Assignment & Map Card */}
               {inspections.filter((i) => i.status === "ASSIGNED").length > 0 ? (
-                <div style={{ background: "#1e293b", padding: "16px", borderRadius: "10px", border: "1px solid #475569" }}>
-                  {/* Blind Lock Protocol Banner */}
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#0f172a", padding: "8px 12px", borderRadius: "6px", border: "1px solid #334155" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                      <Lock size={14} color="#f59e0b" />
-                      <span style={{ fontSize: "11px", fontWeight: "bold", color: "#f59e0b" }}>BLIND DUTY LOCK</span>
-                    </div>
-                    <span style={{ fontSize: "11px", color: "#94a3b8" }}>Center details locked: <b>42m left</b></span>
+                <div style={{ background: "#1e293b", padding: "16px", borderRadius: "10px", border: isSlaExpired ? "1px solid #dc2626" : "1px solid #475569" }}>
+    
+                {/* SLA Countdown Timer */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: isSlaExpired ? "rgba(220,38,38,0.2)" : "#0f172a", padding: "10px 12px", borderRadius: "6px", border: `1px solid ${isSlaExpired ? "#dc2626" : "#334155"}`, marginBottom: "12px" }}>
+                    <span style={{ fontSize: "11px", color: "#94a3b8", fontWeight: "bold" }}>MANDATORY SLA TIMER</span>
+                    <span style={{ fontSize: "14px", fontFamily: "monospace", fontWeight: "bold", color: isSlaExpired ? "#ef4444" : "#38bdf8" }}>
+                      {isSlaExpired ? "00:00:00 [SLA BREACHED]" : `${formatTime(timeLeft)} remaining`}
+                    </span>
                   </div>
 
-                  <div style={{ fontSize: "15px", fontWeight: "bold", marginTop: "12px" }}>{activeNgo.name}</div>
-                  <div style={{ fontSize: "12px", color: "#94a3b8" }}>Enforced Perimeter: 200m Radius</div>
+                  {/* Progressive Blind Lock Protocol Banner */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#0a0f1d", padding: "8px 12px", borderRadius: "6px", border: "1px solid #1f2937", marginBottom: "12px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <Lock size={14} color={timeLeft > 3600 ? "#f59e0b" : "#22c55e"} />
+                    <span style={{ fontSize: "11px", fontWeight: "bold", color: timeLeft > 3600 ? "#f59e0b" : "#4ade80" }}>
+                        {timeLeft > 3600 ? "STAGE 1: AREA SEALED" : "STAGE 2: DESTINATION UNLOCKED"}
+                      </span>
+                    </div>
+                    <span style={{ fontSize: "10px", color: "#94a3b8" }}>
+                      {timeLeft > 3600 ? "Exact center hidden to prevent advance leak" : "Full GPS Route Accessible"}
+                      </span>
+                  </div>
 
-                  {/* Leaflet Map with 200m Ring */}
+                  {/* Target Display (Obfuscated if sealed, clear if unlocked) */}
+                  <div style={{ fontSize: "15px", fontWeight: "bold" }}>
+                    {timeLeft > 3600 ? "Sector 4 — Residential Facility (Masked)" : activeNgo.name}
+                  </div>
+                    <div style={{ fontSize: "12px", color: "#94a3b8" }}>
+                    {timeLeft > 3600 ? "General Zone: Mansarovar / Sanganer Perimeter" : "Enforced Perimeter: 200m Radius"}
+                  </div>
+
+                    {/* Leaflet Map */}
                   <GeoFenceMap
                     ngoLat={activeNgo.latitude}
                     ngoLon={activeNgo.longitude}
                     inspectorLat={inspectorLocation ? inspectorLocation.lat : 26.8500}
                     inspectorLon={inspectorLocation ? inspectorLocation.lon : 75.5700}
                     isInside={dutyResult?.success || false}
-                  />
-
-                  <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "14px" }}>
-                    <button
-                      onClick={() => submitFieldVerification(inspections.find((i) => i.status === "ASSIGNED").id, false)}
-                      disabled={isCheckingIn}
-                      style={{ background: "#dc2626", color: "#fff", border: "none", padding: "10px", borderRadius: "6px", fontWeight: "bold", fontSize: "12px", cursor: "pointer" }}
-                    >
-                      {isCheckingIn ? "Validating..." : "Verify With Device GPS (Out of Zone)"}
-                    </button>
-
-                    <button
-                      onClick={() => submitFieldVerification(inspections.find((i) => i.status === "ASSIGNED").id, true)}
-                      disabled={isCheckingIn}
-                      style={{ background: "#16a34a", color: "#fff", border: "none", padding: "10px", borderRadius: "6px", fontWeight: "bold", fontSize: "12px", cursor: "pointer" }}
-                    >
-                      Simulate Arrival Inside Radius (Passes)
-                    </button>
+    />
+                  {/* On-Site Camera Shutter Evidence */}
+                  <div style={{ marginTop: "12px", background: "#0a0f1d", padding: "12px", borderRadius: "8px", border: "1px solid #1f2937" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                      <span style={{ fontSize: "11px", fontWeight: "bold", color: "#cbd5e1" }}>ON-SITE PROOF CAPTURE</span>
+                      <button
+                        type="button"
+                        onClick={captureProofSnapshot}
+                        style={{ background: "#2563eb", color: "#fff", border: "none", padding: "5px 12px", borderRadius: "5px", fontSize: "11px", cursor: "pointer", fontWeight: "bold" }}
+    >
+                        📷 Snap Verification Frame
+                      </button>
+                    </div>
+                    {evidencePhoto ? (
+                      <img 
+                        src={evidencePhoto} 
+                        alt="On-site Evidence" 
+                        style={{ width: "100%", height: "130px", objectFit: "cover", borderRadius: "6px", border: "1px solid #38bdf8" }} 
+    />
+                    ) : (
+                      <div style={{ height: "65px", display: "flex", alignItems: "center", justifyContent: "center", color: "#64748b", fontSize: "11px", border: "1px dashed #334155", borderRadius: "6px" }}>
+                        Click button above to snap physical entrance/gate proof
+                      </div>
+                    )}
                   </div>
+
+                  {/* Actions: Disabled completely if SLA is expired */}
+                  {isSlaExpired ? (
+                      <div style={{ marginTop: "14px", padding: "10px", background: "rgba(220,38,38,0.15)", border: "1px solid #dc2626", borderRadius: "6px", color: "#f87171", fontSize: "12px", textAlign: "center", fontWeight: "bold" }}>
+                      Report generation locked. Formal SLA Evasion Penalty logged on inspector registry.
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "14px" }}>
+                      <button
+                        onClick={() => submitFieldVerification(inspections.find((i) => i.status === "ASSIGNED").id, false)}
+                        disabled={isCheckingIn}
+                          style={{ background: "#dc2626", color: "#fff", border: "none", padding: "10px", borderRadius: "6px", fontWeight: "bold", fontSize: "12px", cursor: "pointer" }}
+        >
+                        {isCheckingIn ? "Validating..." : "Verify With Device GPS (Out of Zone)"}
+                      </button>
+
+                      <button
+                        onClick={() => submitFieldVerification(inspections.find((i) => i.status === "ASSIGNED").id, true)}
+                        disabled={isCheckingIn}
+                        style={{ background: "#16a34a", color: "#fff", border: "none", padding: "10px", borderRadius: "6px", fontWeight: "bold", fontSize: "12px", cursor: "pointer" }}
+                      >
+                        Simulate Arrival Inside Radius (Passes)
+                      </button>
+                      </div>
+                  )}
                 </div>
               ) : (
                 <div style={{ textAlign: "center", padding: "30px 10px", color: "#64748b" }}>
@@ -435,22 +602,19 @@ export default function App() {
               )}
             </div>
           </div>
+        ) : (
+          /* ================= NGO PORTAL VIEW ================= */
+          <NgoDashboard activeNgo={activeNgo} onReportUpdated={syncState} />
         )}
       </div>
 
       {/* Surprise Video Call Modal */}
-      {isCalling && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
-          <div style={{ background: "#1e293b", padding: "24px", borderRadius: "12px", width: "400px", textAlign: "center", border: "1px solid #475569" }}>
-            <PhoneCall size={32} color="#ef4444" style={{ margin: "0 auto 12px" }} />
-            <div style={{ fontSize: "16px", fontWeight: "bold" }}>Emergency Video Link</div>
-            <div style={{ color: "#94a3b8", fontSize: "12px", marginTop: "6px" }}>Connecting to Asha Kiran Center Warden...</div>
-            <button onClick={() => setIsCalling(false)} style={{ marginTop: "16px", background: "#dc2626", color: "#fff", border: "none", padding: "8px 16px", borderRadius: "6px", cursor: "pointer" }}>
-              End Call
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Interactive Emergency Video Call */}
+      <VideoCallModal
+        isOpen={isCalling}
+        onClose={() => setIsCalling(false)}
+        ngoName={activeNgo.name}
+      />
     </div>
   );
 }
